@@ -1,0 +1,44 @@
+name: Trivy
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  trivy:
+    name: Trivy Scan
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        id: checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Run Trivy scan
+        id: trivy-scan
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: config
+          scan-ref: infra
+          format: sarif
+          trivyignores: ".github/.trivyignore.yml"
+          output: trivy-results.sarif
+          exit-code: 1
+
+      - name: Upload Trivy results as artifact
+        if: always() && steps.trivy-scan.conclusion == 'failure'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: trivy-results
+          path: trivy-results.sarif
+
+      - name: Output Trivy results
+        if: always() && steps.trivy-scan.conclusion == 'failure'
+        run: cat trivy-results.sarif

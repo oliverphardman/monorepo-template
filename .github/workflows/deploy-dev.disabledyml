@@ -1,0 +1,167 @@
+name: Deploy Development
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: eu-west-2
+  ENVIRONMENT: dev
+
+jobs:
+  changes:
+    name: What changed
+    runs-on: self-hosted
+    outputs:
+      infra: ${{ steps.filter.outputs.infra }}
+      web: ${{ steps.filter.outputs.web }}
+      android: ${{ steps.filter.outputs.android }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - id: filter
+        name: Compare against the previous commit
+        run: |
+          set -euo pipefail
+
+          before="${{ github.event.before }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+            || [ -z "$before" ] \
+            || [ "$before" = "0000000000000000000000000000000000000000" ] \
+            || ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+            echo "No usable base commit; deploying everything."
+            changed=""
+            all=true
+          else
+            changed="$(git diff --name-only "$before" "${{ github.sha }}")"
+            all=false
+            echo "Changed files:"; echo "$changed"
+          fi
+
+          matches() {
+            if [ "$all" = true ]; then return 0; fi
+            echo "$changed" | grep -qE "$1"
+          }
+
+          # matches '^(infra/|apps/api/)' && echo "infra=true" >> "$GITHUB_OUTPUT" || echo "infra=false" >> "$GITHUB_OUTPUT"
+          # matches '^apps/web/' && echo "web=true" >> "$GITHUB_OUTPUT" || echo "web=false" >> "$GITHUB_OUTPUT"
+          # matches '^apps/android/' && echo "android=true" >> "$GITHUB_OUTPUT" || echo "android=false" >> "$GITHUB_OUTPUT"
+
+terraform:
+  name: Terraform
+  needs: changes
+  if: needs.changes.outputs.infra == 'true'
+  runs-on: self-hosted
+  environment: Development
+  steps:
+    - uses: actions/checkout@v7
+
+    - uses: pnpm/action-setup@v4
+      with:
+        version: 10
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 22
+        cache: pnpm
+        cache-dependency-path: apps/api/pnpm-lock.yaml
+
+    - uses: aws-actions/configure-aws-credentials@v6
+      with:
+        role-to-assume: ${{ vars.AWS_ROLE }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - uses: hashicorp/setup-terraform@v4
+      with:
+        terraform_wrapper: false
+
+    - name: Init
+      run: terraform init -backend-config=environments/dev.s3.tfbackend -reconfigure
+      working-directory: infra/stack
+
+    - name: Plan
+      run: terraform plan -var-file=environments/dev.tfvars -out=tfplan
+      working-directory: infra/stack
+      env:
+        TF_VAR_google_client_id: ${{ vars.GOOGLE_CLIENT_ID }}
+        TF_VAR_google_client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+
+    - name: Apply
+      run: terraform apply -auto-approve tfplan
+      working-directory: infra/stack
+      env:
+        TF_VAR_google_client_id: ${{ vars.GOOGLE_CLIENT_ID }}
+        TF_VAR_google_client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+web:
+  name: Web
+  needs: [changes, terraform]
+  if: |
+    always()
+    && needs.terraform.result != 'failure'
+    && (needs.changes.outputs.web == 'true' || needs.changes.outputs.infra == 'true')
+  runs-on: self-hosted
+  environment: Development
+  steps:
+    - uses: actions/checkout@v7
+
+    - uses: pnpm/action-setup@v4
+      with:
+        version: 10
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 22
+        cache: pnpm
+        cache-dependency-path: apps/web/pnpm-lock.yaml
+
+    - uses: aws-actions/configure-aws-credentials@v6
+      with:
+        role-to-assume: ${{ vars.AWS_ROLE }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - run: pnpm install --frozen-lockfile
+      working-directory: apps/web
+
+    - name: Build and upload
+      run: ./deploy.sh dev
+      working-directory: apps/web
+android:
+  name: Android
+  needs: changes
+  if: needs.changes.outputs.android == 'true'
+  runs-on: self-hosted
+  steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: 25
+
+    - name: Set up Android SDK
+      uses: amyu/setup-android@09345fc2cbed5b3a92beea84d843a22eac6cc841
+      with:
+        sdk-version: "36"
+
+    - uses: gradle/actions/setup-gradle@v6
+
+    - name: Build
+      run: ./gradlew :app:assembleDebug
+      working-directory: apps/android
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: app-debug-${{ github.sha }}
+        path: apps/android/app/build/outputs/apk/debug/app-debug.apk
+        retention-days: 14

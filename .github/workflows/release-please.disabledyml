@@ -1,0 +1,66 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+  issues: write
+
+jobs:
+  release-please:
+    runs-on: self-hosted
+    env:
+      APP_PRIVATE_KEY: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+    steps:
+      - name: Check the app is fully configured
+        if: env.APP_PRIVATE_KEY != '' && vars.RELEASE_PLEASE_APP_CLIENT_ID == ''
+        run: |
+          echo "::error::RELEASE_PLEASE_APP_PRIVATE_KEY is set but RELEASE_PLEASE_APP_CLIENT_ID is not." \
+            "Add the app's Client ID as a repository variable, then re-run."
+          exit 1
+
+      - name: Mint a token for the app
+        id: app-token
+        if: env.APP_PRIVATE_KEY != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+
+      - name: Explain a token that could not be minted
+        if: failure() && steps.app-token.outcome == 'failure'
+        run: |
+          echo "::error::Could not mint an app token. Either the app is not installed on this repository" \
+            "(a 404 naming get-a-repository-installation), or RELEASE_PLEASE_APP_CLIENT_ID is not this" \
+            "app's Client ID (a 401). Installing is done from the app's settings page, not the repository's."
+
+      - name: Note that releases will not trigger anything
+        if: env.APP_PRIVATE_KEY == ''
+        run: |
+          echo "::warning::No RELEASE_PLEASE_APP_PRIVATE_KEY, so this runs as GITHUB_TOKEN. The release" \
+            "pull request will not run CI, and publishing a release will not start the Release workflow -" \
+            "it has to be dispatched by hand."
+
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+
+      - name: Summarise
+        if: steps.release.outputs.releases_created == 'true'
+        run: |
+          echo "### Released ${{ steps.release.outputs.tag_name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Production deployment runs from the published release; see the Release workflow." >> "$GITHUB_STEP_SUMMARY"

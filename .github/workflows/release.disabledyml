@@ -1,0 +1,200 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to deploy, e.g. v0.2.0
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  AWS_REGION: eu-west-2
+
+jobs:
+  terraform:
+    name: Terraform (Production)
+    runs-on: self-hosted
+    environment: Production
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/api/pnpm-lock.yaml
+
+      - name: Build the API bundle
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+        working-directory: apps/api
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_wrapper: false
+
+      - name: Init
+        run: terraform init -backend-config=environments/prod.s3.tfbackend -reconfigure
+        working-directory: infra/stack
+
+      - name: Plan
+        run: terraform plan -var-file=environments/prod.tfvars -out=tfplan
+        working-directory: infra/stack
+        env:
+          TF_VAR_google_client_id: ${{ vars.GOOGLE_CLIENT_ID }}
+          TF_VAR_google_client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+
+      - name: Apply
+        run: terraform apply -auto-approve tfplan
+        working-directory: infra/stack
+        env:
+          TF_VAR_google_client_id: ${{ vars.GOOGLE_CLIENT_ID }}
+          TF_VAR_google_client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+
+  web:
+    name: Web (Production)
+    needs: terraform
+    runs-on: self-hosted
+    environment: Production
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - run: pnpm install --frozen-lockfile
+        working-directory: apps/web
+
+      - name: Build and upload
+        run: ./deploy.sh prod
+        working-directory: apps/web
+
+  android:
+    name: Android (Production)
+    runs-on: self-hosted
+    environment: Production
+    env:
+      KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Set up Android SDK
+        uses: amyu/setup-android@09345fc2cbed5b3a92beea84d843a22eac6cc841
+        with:
+          sdk-version: "36"
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Unit tests
+        run: ./gradlew :app:testDebugUnitTest
+        working-directory: apps/android
+
+      - name: Require the signing key
+        if: env.KEYSTORE_BASE64 == ''
+        run: |
+          echo "::error::No ANDROID_KEYSTORE_BASE64 secret on this environment, so the release cannot be" \
+            "signed. Add it, along with ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and" \
+            "ANDROID_KEY_PASSWORD, then re-run this workflow with the same tag."
+          exit 1
+
+      - name: Decode the keystore
+        id: keystore
+        if: env.KEYSTORE_BASE64 != ''
+        run: |
+          set -euo pipefail
+          path="$RUNNER_TEMP/release.jks"
+          # Through the environment rather than interpolated into the script: a secret pasted into a shell
+          # command line is one stray quote away from being executed rather than decoded.
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$path"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble release
+        run: ./gradlew :app:assembleRelease
+        working-directory: apps/android
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ steps.keystore.outputs.path }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Name the artefact after the release
+        id: apk
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || github.event.release.tag_name }}"
+          built="$(find apps/android/app/build/outputs/apk/release -name '*.apk' | head -1)"
+          if [ -z "$built" ]; then echo "No APK was produced" >&2; exit 1; fi
+
+          # The filename says whether it can actually be installed, because "release" alone does not.
+          case "$built" in
+            *unsigned*) suffix="-unsigned" ;;
+            *) suffix="" ;;
+          esac
+
+          out="asset-tracker-${tag}${suffix}.apk"
+          cp "$built" "$out"
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+          echo "Built $out" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mint a token for the app
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "${{ steps.apk.outputs.path }}" --clobber
+
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: asset-tracker-${{ inputs.tag }}
+          path: ${{ steps.apk.outputs.path }}

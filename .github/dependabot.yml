@@ -1,0 +1,97 @@
+# Uncomment where relevant for different apps and frameworks
+
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 3
+    labels: [dependencies]
+    commit-message:
+      prefix: chore(ci)
+    groups:
+      actions:
+        patterns: ["*"]
+
+  #- package-ecosystem: npm
+  #  directories:
+  #    - /apps/api
+  #    - /apps/web
+  #  schedule:
+  #    interval: weekly
+  #    day: monday
+  #    time: "07:00"
+  #    timezone: Europe/London
+  #  open-pull-requests-limit: 5
+  #  labels: [dependencies]
+  #  versioning-strategy: increase
+  #  ignore:
+  #    # Must track the Lambda runtime (nodejs22.x) and CI's Node. Minors and patches within 22 are fine.
+  #    - dependency-name: "@types/node"
+  #      update-types: [version-update:semver-major]
+  #  commit-message:
+  #    prefix: chore(deps)
+  #    prefix-development: chore(deps-dev)
+  #    include: scope
+  #  groups:
+  #    build-and-types:
+  #      dependency-type: development
+  #      patterns: ["*"]
+  #      update-types: [minor, patch]
+  #    runtime:
+  #      dependency-type: production
+  #      update-types: [minor, patch]
+
+  #- package-ecosystem: gradle
+  #  directory: /apps/android
+  #  schedule:
+  #    interval: weekly
+  #    day: monday
+  #    time: "07:00"
+  #    timezone: Europe/London
+  #  open-pull-requests-limit: 5
+  #  labels: [dependencies]
+  #  commit-message:
+  #    prefix: chore(deps)
+  #  ignore:
+  #    - dependency-name: org.jetbrains.kotlin:*
+  #    - dependency-name: org.jetbrains.kotlin.plugin.*
+  #    - dependency-name: com.google.devtools.ksp*
+  #    - dependency-name: io.coil-kt.coil3:*
+  #    - dependency-name: org.jetbrains.kotlinx:kotlinx-serialization-json
+  #    - dependency-name: com.squareup.okhttp3:*
+  #    - dependency-name: org.jetbrains.kotlinx:kotlinx-coroutines-test
+  #    - dependency-name: com.symbol:emdk
+  #  groups:
+  #    androidx:
+  #      patterns:
+  #        - androidx.*
+  #        - com.google.android.material:*
+  #      update-types: [minor, patch]
+  #    other:
+  #      patterns: ["*"]
+  #      exclude-patterns: [androidx.*]
+  #      update-types: [minor, patch]
+
+  #- package-ecosystem: terraform
+  #  directories:
+  #    - /infra/stack
+  #    - /infra/bootstrap
+  #    - /infra/modules/*
+  #  schedule:
+  #    interval: weekly
+  #    day: monday
+  #    time: "07:00"
+  #    timezone: Europe/London
+  #  open-pull-requests-limit: 3
+  #  labels: [dependencies]
+  #  commit-message:
+  #    prefix: chore(infra)
+  #  groups:
+  #    providers:
+  #      patterns: ["*"]

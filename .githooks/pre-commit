@@ -1,0 +1,39 @@
+#!/usr/bin/env sh
+# Enabled with: git config core.hooksPath .githooks
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+staged() { git diff --cached --name-only --diff-filter=ACMR; }
+
+# Whitespace errors (trailing whitespace, conflict markers) in staged changes.
+git diff --cached --check
+
+# Terraform: init (no backend), validate and fmt in each directory with staged changes.
+tf_dirs=$(staged | grep -E '\.(tf|tfvars)$' | xargs -n1 dirname 2>/dev/null | sort -u || true)
+if [ -n "$tf_dirs" ]; then
+	command -v terraform >/dev/null 2>&1 || { echo "pre-commit: terraform is required but not installed." >&2; exit 1; }
+	for dir in $tf_dirs; do
+		# A deleted-then-staged directory or a tfvars-only change has nothing to validate.
+		ls "$dir"/*.tf >/dev/null 2>&1 || continue
+		echo "pre-commit: terraform checks in $dir"
+		terraform -chdir="$dir" init -backend=false -input=false -no-color >/dev/null
+		terraform -chdir="$dir" validate -no-color
+		terraform -chdir="$dir" fmt -check -diff || {
+			echo "pre-commit: '$dir' is not formatted. Run 'terraform fmt' and re-stage." >&2
+			exit 1
+		}
+	done
+fi
+
+# Node apps: lint, test and format for each app with staged changes.
+app_dirs=$(staged | grep -E '^apps/[^/]+/' | cut -d/ -f1-2 | sort -u || true)
+for dir in $app_dirs; do
+	[ -f "$dir/package.json" ] || continue
+	command -v pnpm >/dev/null 2>&1 || { echo "pre-commit: pnpm is required but not installed." >&2; exit 1; }
+	echo "pre-commit: pnpm checks in $dir"
+	for script in lint test format; do
+		pnpm --dir "$dir" run --if-present "$script"
+	done
+done
